@@ -69,14 +69,6 @@ select:disabled{color:#808080;background:#e0e0e0}
 .panel .chip.done{text-decoration:line-through;opacity:.85}
 .panel summary{cursor:default}
 #statusbar{margin-top:6px;border:2px solid;border-color:#808080 #fff #fff #808080;background:#c0c0c0;font:12px "Courier New",Courier,monospace;padding:3px 6px;min-height:24px;line-height:1.35}
-.dpad{display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:4px;touch-action:manipulation;user-select:none;-webkit-user-select:none}
-.dpad button{min-width:0;width:52px;height:52px;padding:0;display:flex;align-items:center;justify-content:center;touch-action:manipulation}
-.dpad .pz{font:bold 11px Arial,Helvetica,sans-serif}
-.dpad .tri{display:block;width:0;height:0;border:11px solid transparent}
-.dpad .tri.up{border-top:0;border-bottom:17px solid #000}
-.dpad .tri.down{border-bottom:0;border-top:17px solid #000}
-.dpad .tri.left{border-left:0;border-right:17px solid #000}
-.dpad .tri.right{border-right:0;border-left:17px solid #000}
 .hidden{display:none!important}
 .foot{font-size:13px;color:#333;margin:4px 0}
 
@@ -106,6 +98,7 @@ dialog .foot2{padding:0 8px 8px;text-align:right}
   #applet{flex:none;width:100%}
   .panel{width:auto;max-height:260px}
   table.ctl th{width:auto}
+  .panel .hide-narrow{display:none}
 }
 </style>
 </head>
@@ -625,37 +618,21 @@ function pixelText(ctx, str, x, y, size, color, align = 'left') {
   return b.w * size;
 }
 
-/* Touch support for the keyboard games (Snake, Pac-Man): swipe on the board, or tap the on-screen arrows. */
+/* Touch support for the keyboard games (Snake, Pac-Man): swipe on the board to steer; a quick tap pauses or resumes. */
 const TOUCH = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || (navigator.maxTouchPoints || 0) > 0;
-function makeSwipe(steer) {                       // a finger drag on the board steers; keep dragging in a new direction to turn again
+function makeSwipe(steer) {
   let s = null;
   return {
-    down(p) { if (p.type !== 'touch') return false; s = { x: p.px, y: p.py, moved: false }; return true; },   // a mouse still scrolls the board
+    down(p) { if (p.type !== 'touch') return false; s = { x: p.px, y: p.py, x0: p.px, y0: p.py, t0: performance.now(), moved: false, far: 0 }; return true; },   // a mouse still scrolls the board
     move(p) {
       if (!s) return;
+      s.far = Math.max(s.far, Math.hypot(p.px - s.x0, p.py - s.y0));
       const dx = p.px - s.x, dy = p.py - s.y;
-      if (Math.hypot(dx, dy) < 24) return;
+      if (Math.hypot(dx, dy) < 24) return;                 // keep sliding in a new direction and the snake turns again
       s.moved = true; steer(Math.abs(dx) > Math.abs(dy) ? [Math.sign(dx), 0] : [0, Math.sign(dy)]); s.x = p.px; s.y = p.py;
     },
-    up() { const moved = !!(s && s.moved); s = null; return moved; },
+    up() { const r = s ? { moved: s.moved, tap: !s.moved && s.far < 14 && performance.now() - s.t0 < 400 } : { moved: false, tap: false }; s = null; return r; },
   };
-}
-function padHTML() {
-  const b = (d, label, inner) => `<button type="button" data-d="${d}" aria-label="${label}">${inner}</button>`;
-  return `<div class="dpad" id="dpad"><span></span>${b('up', 'Up', '<i class="tri up"></i>')}<span></span>
-    ${b('left', 'Left', '<i class="tri left"></i>')}${b('pause', 'Pause', '<span class="pz">Pause</span>')}${b('right', 'Right', '<i class="tri right"></i>')}
-    <span></span>${b('down', 'Down', '<i class="tri down"></i>')}<span></span></div>`;
-}
-function wirePad(steer, pause) {
-  const root = document.getElementById('dpad'); if (!root) return;
-  const dirs = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
-  const act = b => { if (b.dataset.d === 'pause') pause(); else steer(dirs[b.dataset.d]); try { Engine.stage.focus({ preventScroll: true }); } catch (e) { } };
-  root.querySelectorAll('button').forEach(b => {
-    let lastPress = -1e9;
-    b.addEventListener('pointerdown', e => { e.preventDefault(); lastPress = performance.now(); act(b); });    // reacts the moment a finger lands
-    // a click with no press just before it can only be the keyboard (Enter / Space); after a tap the browser sends a click too, which we ignore
-    b.addEventListener('click', () => { if (performance.now() - lastPress > 800) act(b); });
-  });
 }
 
 
@@ -1587,11 +1564,6 @@ Games.push((() => {
   }
   function togglePause() { if (state === 'play') paused = !paused; }
   const swipe = makeSwipe(steer);
-  function renderPanel() {                       // only touch screens need this panel
-    if (!TOUCH) return;
-    UI.panel(`<h3>Controls</h3>${padHTML()}<p class="note">Swipe on the board (keep sliding your finger in a new direction to turn), or tap the arrows. Pause stops the game.</p>`);
-    wirePad(steer, togglePause);
-  }
 
   /* ---------- game flow ---------- */
   function resetPositions() {
@@ -1599,11 +1571,11 @@ Games.push((() => {
     newGhosts(); frightT = 0; state = 'ready'; stateT = 0; paused = false; UI.banner(''); hud();
   }
   function hud() {
-    UI.status(`Score <b>${score}</b> &nbsp;·&nbsp; Lives <b style="color:#e8590c">${'●'.repeat(Math.max(0, lives))}</b> &nbsp;·&nbsp; Dots left <b>${dotsLeft}</b> &nbsp;|&nbsp; ${TOUCH ? 'Swipe the board or tap the arrows' : 'Arrow keys / WASD to steer · Space to pause'}`);
+    UI.status(`Score <b>${score}</b> &nbsp;·&nbsp; Lives <b style="color:#e8590c">${'●'.repeat(Math.max(0, lives))}</b> &nbsp;·&nbsp; Dots left <b>${dotsLeft}</b> &nbsp;|&nbsp; ${TOUCH ? 'Swipe the board to steer · tap to pause' : 'Arrow keys / WASD to steer · Space to pause'}`);
   }
 
   const g = {
-    id: 'pacman', name: 'Pac-Man', group: 'Games', order: 4, iconImg: 'pacicon', touchPad: true,
+    id: 'pacman', name: 'Pac-Man', group: 'Games', order: 4, iconImg: 'pacicon',
     blurb: 'Dots, ghosts and wraparound tunnels', opts: { difficulty: true, difficultyLabel: 'Ghosts', reset: 'New game' },
     layers: ['bg', 'maze', 'actors'], home: [0.5, 0.5], bgColor: '#05061c',
     help: `<p>Steer <b style="color:#b38f00">Pac-Man</b> with the <b>arrow keys</b> (or <b>W A S D</b>) and eat every dot. Eat a big <b>power pellet</b> and the ghosts turn blue &mdash; for a few seconds you can eat <em>them</em>!
@@ -1617,7 +1589,7 @@ Touching a ghost when it isn't blue costs a life. You have three lives. <b>Space
 <li><b>Klein Bottle:</b> tunnels left/right (plain) and top/bottom (with the half-twist, so you come out on the opposite side and mirror-reversed).</li>
 <li><b>Projective Plane:</b> tunnels on all four sides, and <em>every</em> one has a half-twist: leave through the left tunnel at row 5 and you come out of the right tunnel at row 13, upside-down!</li>
 </ul>
-<p><b>On a phone or tablet:</b> swipe on the board to steer (keep sliding your finger in a new direction to turn again), or tap the arrow buttons. Tap <b>Pause</b> to pause.</p>
+<p><b>On a phone or tablet:</b> swipe on the board to steer (keep sliding your finger in a new direction to turn again). A quick tap on the board pauses or resumes.</p>
 <p>The game keeps the arrow keys matched to the picture you are looking at: scroll the board to a mirrored or upside-down copy and the keys swap to match.</p>
 <p>The <b>Ghosts</b> menu sets how many ghosts chase you (2&ndash;4), how fast they are, and how long they stay blue.</p>
 <p><b>Try this:</b> switch to the <b>Repeating</b> view &mdash; you will see Pac-Man in every copy of the maze at once, so you can watch a ghost come through a tunnel before it arrives.</p>`,
@@ -1639,7 +1611,7 @@ Touching a ghost when it isn't blue costs a life. You have three lives. <b>Space
           else segs.push([(h + 1) / W, v / H, (h + 1) / W, (v + 1) / H]);
         }
       }
-      renderPanel(); resetPositions();
+      resetPositions();
     },
     difficultyChanged() { this.reset(); },
     playersChanged() { },
@@ -1725,7 +1697,7 @@ Touching a ghost when it isn't blue costs a life. You have three lives. <b>Space
     },
     pointerDown(p) { return swipe.down(p); },
     pointerMove(p) { swipe.move(p); },
-    pointerUp() { swipe.up(); },
+    pointerUp() { if (swipe.up().tap) togglePause(); },        // a quick tap pauses / resumes
     pointerCancel() { swipe.up(); },
     dbg() { return { pac, ghosts, dotsLeft, lives, score, state, dots, get paused() { return paused; } }; },
   };
@@ -1867,7 +1839,7 @@ Games.push((() => {
 Games.push((() => {
   const N = 20, SPEEDS = [6, 9, 12, 16];
   const BG = '#a8b979', INK = '#1d2911', DIM = 'rgba(29,41,17,0.11)';
-  let body, dir, queue, food, state, acc, tA, apples, dead;
+  let body, dir, queue, food, state, acc, tA, apples, dead, lastMsg = null;
   const best = {};
   const same = (a, b) => a[0] === b[0] && a[1] === b[1];
   const score = () => apples * 7;
@@ -1879,25 +1851,24 @@ Games.push((() => {
   }
   // The score lives beside the board (in the side panel), in the same pixel style, so nothing is drawn over the board itself.
   function renderPanel() {
-    UI.panel(`<h3>Snake</h3>
-      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start">
-        <canvas id="sn-lcd" width="${TOUCH ? 150 : 236}" height="${TOUCH ? 92 : 118}" style="display:block;border:2px solid #1d2911;background:${BG}"></canvas>${TOUCH ? padHTML() : ''}</div>
-      <p class="note">${TOUCH ? 'Swipe on the board, or tap the arrows.' : 'Arrow keys or W A S D steer the snake. Space pauses.'} Each bite scores 7 points and makes the snake one square longer.</p>
-      <p class="note">${App.hwall || App.vwall ? 'On this surface the walls end the game.' : 'On this surface there are no walls: the snake can go through every edge.'}</p>`);
-    drawLcd(); if (TOUCH) wirePad(steer, togglePause);
+    UI.panel(`<h3 class="hide-narrow">Snake</h3>
+      <canvas id="sn-lcd" width="236" height="118" style="display:block;border:2px solid #1d2911;background:${BG}"></canvas>
+      <p class="note hide-narrow">${TOUCH ? 'Swipe on the board to steer. Tap the board to pause or resume.' : 'Arrow keys or W A S D steer the snake. Space pauses.'} Each bite scores 7 points and makes the snake one square longer.</p>
+      <p class="note hide-narrow">${App.hwall || App.vwall ? 'On this surface the walls end the game.' : 'On this surface there are no walls: the snake can go through every edge.'}</p>`);
+    drawLcd();
   }
   function drawLcd() {
     const c = document.getElementById('sn-lcd'); if (!c) return;
     const x = c.getContext('2d'); x.fillStyle = BG; x.fillRect(0, 0, c.width, c.height);
     x.fillStyle = DIM; for (let i = 0; i < c.width; i += 6) for (let j = 0; j < c.height; j += 6) x.fillRect(i + 1, j + 1, 4, 4);   // the faint unlit pixels
-    const px = TOUCH ? 2 : 3, row = y => (TOUCH ? 8 : 10) + y * (TOUCH ? 27 : 34), m = TOUCH ? 8 : 12;
+    const px = 3, row = y => 10 + y * 34, m = 12;
     pixelText(x, 'SCORE', m, row(0), px, INK); pixelText(x, String(score()).padStart(4, '0'), c.width - m, row(0), px, INK, 'right');
     pixelText(x, 'BEST', m, row(1), px, INK); pixelText(x, String(best[App.topology] || 0).padStart(4, '0'), c.width - m, row(1), px, INK, 'right');
     pixelText(x, 'LENGTH', m, row(2), px, INK); pixelText(x, String(body.length).padStart(4, '0'), c.width - m, row(2), px, INK, 'right');
   }
   function hud() {
     drawLcd();
-    UI.status(`Score <b>${score()}</b> &nbsp;·&nbsp; Best <b>${best[App.topology] || 0}</b> &nbsp;|&nbsp; ${TOUCH ? 'Swipe the board or tap the arrows' : 'Arrow keys / WASD to steer &middot; Space to pause'}` +
+    UI.status(`Score <b>${score()}</b> &nbsp;·&nbsp; Best <b>${best[App.topology] || 0}</b> &nbsp;|&nbsp; ${TOUCH ? 'Swipe the board to steer &middot; tap to pause' : 'Arrow keys / WASD to steer &middot; Space to pause'}` +
       (App.hwall || App.vwall ? ' &nbsp;|&nbsp; Walls end the game!' : ''));
   }
   function die() {
@@ -1933,7 +1904,7 @@ Games.push((() => {
   const g = {
     id: 'snake', name: 'Snake', group: 'Games', order: 5, iconImg: 'snakeicon',
     blurb: 'Old-school phone snake', opts: { difficulty: true, difficultyLabel: 'Speed', reset: 'New game' },
-    layers: ['bg', 'items'], home: [0.5, 0.5], bgColor: BG, touchPad: true,
+    layers: ['bg', 'items'], home: [0.5, 0.5], bgColor: BG, roomBelow: 160,
     help: `<p>The classic phone game. Steer the snake with the <b>arrow keys</b> (or <b>W A S D</b>) to eat the food. Every bite makes the snake longer and scores 7 points.
 The game ends if the snake runs into <em>itself</em>, or into a wall on the surfaces that have walls. <b>Space</b> pauses.</p>
 <p>The snake can slither through the edges of the board:</p>
@@ -1945,7 +1916,7 @@ The game ends if the snake runs into <em>itself</em>, or into a wall on the surf
 <li><b>Klein Bottle:</b> left and right join normally; top and bottom join with a mirror flip.</li>
 <li><b>Projective Plane:</b> every edge flips you: go off the right and you come back on the left, upside-down.</li>
 </ul>
-<p><b>On a phone or tablet:</b> swipe on the board to steer (keep sliding your finger in a new direction to turn again), or tap the arrow buttons. Tap <b>Pause</b> to pause.</p>
+<p><b>On a phone or tablet:</b> swipe on the board to steer (keep sliding your finger in a new direction to turn again). A quick tap on the board pauses or resumes.</p>
 <p>The keys follow the picture: if you scroll to a mirrored or upside-down copy of the board, the keys swap to match what you see.</p>
 <p><b>Try this:</b> in the <b>Repeating</b> view you can see the snake's head arriving through an edge before it gets there, so you can plan your turns. The <b>Speed</b> menu sets how fast the snake moves.</p>`,
     enter() { this.reset(); },
@@ -1977,13 +1948,16 @@ The game ends if the snake runs into <em>itself</em>, or into a wall on the surf
     },
     overlay(ctx, b) {
       const px = Math.max(3, Math.floor(b.boxPx / 150));
-      const msg = state === 'ready' ? (TOUCH ? ['SWIPE OR TAP', 'AN ARROW'] : ['PRESS AN', 'ARROW KEY']) : state === 'paused' ? ['PAUSED'] : state === 'over' ? ['GAME OVER', 'SCORE ' + score()] : null;
+      const msg = state === 'ready' ? (TOUCH ? ['SWIPE TO', 'START'] : ['PRESS AN', 'ARROW KEY']) : state === 'paused' ? ['PAUSED'] : state === 'over' ? ['GAME OVER', 'SCORE ' + score()] : null;
       if (!msg) return;
       // the message sits in the lower part of the board, away from where the snake starts
-      const sz = px * 2, lh = sz * 10, wmax = Math.max(...msg.map(m => pixelBitmap(m).w)) * sz + sz * 8, hh = msg.length * lh + sz * 2;
+      const widest = Math.max(...msg.map(m => pixelBitmap(m).w));
+      const sz = Math.max(2, Math.min(px * 2, Math.floor(b.boxPx * 0.8 / (widest + 8))));    // the pixel size shrinks so the message always fits the board
+      const lh = sz * 10, wmax = widest * sz + sz * 8, hh = msg.length * lh + sz * 2;
+      lastMsg = { w: wmax, h: hh, boxPx: b.boxPx, sz };
       const x = b.bx + b.boxPx / 2 - wmax / 2, y = b.by + b.boxPx * 0.80 - hh / 2;
       ctx.fillStyle = BG; ctx.fillRect(x, y, wmax, hh);
-      ctx.strokeStyle = INK; ctx.lineWidth = px; ctx.strokeRect(x + px, y + px, wmax - 2 * px, hh - 2 * px);
+      const lw = Math.max(2, Math.round(sz / 3)); ctx.strokeStyle = INK; ctx.lineWidth = lw; ctx.strokeRect(x + lw, y + lw, wmax - 2 * lw, hh - 2 * lw);
       msg.forEach((m, i) => pixelText(ctx, m, b.bx + b.boxPx / 2, y + sz * 1.5 + i * lh, sz, INK, 'center'));
     },
     update(dt) {
@@ -2006,9 +1980,9 @@ The game ends if the snake runs into <em>itself</em>, or into a wall on the surf
     },
     pointerDown(p) { return swipe.down(p); },
     pointerMove(p) { swipe.move(p); },
-    pointerUp() { if (!swipe.up() && state === 'ready') state = 'play'; },       // a tap on the board starts the game
+    pointerUp() { if (swipe.up().tap) { if (state === 'ready') state = 'play'; else togglePause(); } },       // a quick tap starts the game, then pauses / resumes it
     pointerCancel() { swipe.up(); },
-    dbg() { return { body, get dir() { return dir; }, food, get state() { return state; }, score, setFood(h, v) { food = { h, v }; }, N }; },
+    dbg() { return { body, get dir() { return dir; }, food, get state() { return state; }, score, setFood(h, v) { food = { h, v }; }, N, get lastMsg() { return lastMsg; } }; },
   };
   return g;
 })());
@@ -2559,8 +2533,8 @@ function openInfo(tab) { showTab(tab); const d = $('dlg'); if (!d.open) d.showMo
 function layout() {
   const a = $('applet'), top = a.getBoundingClientRect().top + window.scrollY, narrow = window.innerWidth <= 900;
   // wide windows: the game box fills the rest of the window; narrow ones (stacked layout): a roughly square box
-  const g = Engine.game, pad = narrow && TOUCH && g && g.touchPad;     // on a phone, leave room below the board for the arrow pad
-  a.style.height = (narrow ? (pad ? clamp(window.innerHeight - top - 280, 250, window.innerWidth - 24) : Math.max(300, Math.min(window.innerWidth - 24, window.innerHeight * 0.78))) : Math.max(380, window.innerHeight - top - 78)) + 'px';
+  const g = Engine.game, room = narrow && g && g.roomBelow;           // some games keep a small panel below the board on a narrow screen
+  a.style.height = (narrow ? (room ? clamp(window.innerHeight - top - room, 250, window.innerWidth - 24) : Math.max(300, Math.min(window.innerWidth - 24, window.innerHeight * 0.78))) : Math.max(380, window.innerHeight - top - 78)) + 'px';
   Engine.resize();
 }
 
