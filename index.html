@@ -97,6 +97,7 @@ dialog .foot2{padding:0 8px 8px;text-align:right}
   #appletrow{flex-direction:column}
   #applet{flex:none;width:100%}
   .panel{width:auto;max-height:260px}
+  .panel.tall{max-height:none}
   table.ctl th{width:auto}
   .panel .hide-narrow{display:none}
 }
@@ -176,17 +177,30 @@ const rnd = n => Math.floor(Math.random() * n);
 const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = rnd(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const pick = a => a[rnd(a.length)];
 
+/* A surface is described by how its left/right edges and its top/bottom edges are joined: 'wall' (not joined),
+   'plain' (joined straight across) or 'twist' (joined with a half-twist, which mirror-reverses whatever goes through).
+   The first six are the surfaces in the Surface menu; the last three are the same shapes tipped on their side, which
+   only the "Glue the Edges" game can reach. */
+const GLUE = {
+  square: ['wall', 'wall'], cylinder: ['wall', 'plain'], mobius: ['wall', 'twist'],
+  torus: ['plain', 'plain'], klein: ['plain', 'twist'], projective: ['twist', 'twist'],
+  cylinder2: ['plain', 'wall'], mobius2: ['twist', 'wall'], klein2: ['twist', 'plain'],
+  custom: ['plain', 'plain'],      // placeholder key used while App.custom (a general unfolding, see below) is in force
+};
 const App = {
-  topology: 'square',     // 'square' | 'cylinder' | 'mobius' | 'torus' | 'klein' | 'projective'
-  view: 'basic',          // 'basic' | 'small' | 'repeat'
+  topology: 'square',     // a key of GLUE
+  view: 'basic',          // 'basic' | 'repeat'
   players: 'computer',    // 'computer' | 'human'
   difficulty: 1,          // 0..3
-  get klein() { return this.topology === 'klein' || this.topology === 'mobius' || this.topology === 'projective'; }, // some edge is glued with a mirror flip
-  get projective() { return this.topology === 'projective'; },   // true when crossing the v seam mirrors the board (Klein Bottle, Möbius Loop)
+  custom: null,           // null, or a general unfolding {tiles: Map('i,j' -> {m}), walls: [sides], hasWalls, infinite, home} made by the Glue the Edges game
+  get lr() { return GLUE[this.topology][0]; },    // how the left and right edges are joined
+  get tb() { return GLUE[this.topology][1]; },    // how the top and bottom edges are joined
+  get klein() { return this.lr === 'twist' || this.tb === 'twist'; },        // some edge is joined with a mirror flip
+  get projective() { return this.lr === 'twist' && this.tb === 'twist'; },
   get mobius() { return this.topology === 'mobius'; },
   get cylinder() { return this.topology === 'cylinder'; },
-  get hwall() { return this.topology === 'mobius' || this.topology === 'square' || this.topology === 'cylinder'; }, // left/right edges are solid walls (no sideways wrap)
-  get vwall() { return this.topology === 'square'; },                               // top/bottom edges are solid walls
+  get hwall() { return !this.custom && this.lr === 'wall'; },     // left/right edges are solid walls (no sideways wrap)
+  get vwall() { return !this.custom && this.tb === 'wall'; },     // top/bottom edges are solid walls
 };
 
 /* ---------- sprites ---------- */
@@ -208,12 +222,17 @@ function loadSprites(map) {
  * `tf` ("handedness") is true when the copy is a mirror image (fx xor fy).
  */
 function tileInfo(i, j) {
-  let fx = false, fy = false;
-  const t = App.topology;
-  if (t === 'klein' || t === 'mobius') fx = mod(j, 2) === 1;
-  else if (t === 'projective') { fx = mod(j, 2) === 1; fy = mod(i, 2) === 1; }
-  return { fx, fy, tf: fx !== fy };
+  if (App.custom) {                                      // a general unfolding: each tile may also be turned by quarter-turns
+    const t = App.custom.tiles.get(i + ',' + j);
+    if (!t) return { exists: false, fx: false, fy: false, tf: false, m: [1, 0, 0, 1], diag: true };
+    const m = t.m, diag = m[1] === 0 && m[2] === 0;
+    return { exists: true, fx: diag && m[0] < 0, fy: diag && m[3] < 0, tf: m[0] * m[3] - m[1] * m[2] < 0, m, diag };
+  }
+  const fx = App.tb === 'twist' && mod(j, 2) === 1;      // crossing a twisted top/bottom edge mirrors left-right
+  const fy = App.lr === 'twist' && mod(i, 2) === 1;      // crossing a twisted left/right edge mirrors top-bottom
+  return { exists: true, fx, fy, tf: fx !== fy, m: [fx ? -1 : 1, 0, 0, fy ? -1 : 1], diag: true };
 }
+const SIDE_REF = { L: [[0, 0], [0, 1]], R: [[1, 0], [1, 1]], T: [[0, 0], [1, 0]], B: [[0, 1], [1, 1]] };
 // Which local cell is the cover cell (cx,cy)? null if it lies beyond a wall of this surface.
 function coverCell(cx, cy, Nw, Nh) {
   const i = Math.floor(cx / Nw), j = Math.floor(cy / Nh);
@@ -235,10 +254,17 @@ function normalize(o) {
 // Which tile does a world position lie in, and where is it inside that tile?
 function locate(wx, wy) {
   const i = Math.floor(wx), j = Math.floor(wy), T = tileInfo(i, j), rx = wx - i, ry = wy - j;
-  return { wx, wy, i, j, fx: T.fx, fy: T.fy, tf: T.tf, u: T.fx ? 1 - rx : rx, v: T.fy ? 1 - ry : ry };
+  let u, v;
+  if (T.diag) { u = T.fx ? 1 - rx : rx; v = T.fy ? 1 - ry : ry; }
+  else { const a = rx - 0.5, b = ry - 0.5; u = 0.5 + T.m[0] * a + T.m[2] * b; v = 0.5 + T.m[1] * a + T.m[3] * b; }   // undo the tile's turn (its inverse is its transpose)
+  return { wx, wy, i, j, fx: T.fx, fy: T.fy, tf: T.tf, m: T.m, exists: T.exists, u, v };
 }
 // World position of local point (u,v) as drawn in tile (i,j)
-function toWorld(i, j, u, v) { const T = tileInfo(i, j); return [i + (T.fx ? 1 - u : u), j + (T.fy ? 1 - v : v)]; }
+function toWorld(i, j, u, v) {
+  const T = tileInfo(i, j);
+  if (T.diag) return [i + (T.fx ? 1 - u : u), j + (T.fy ? 1 - v : v)];
+  const a = u - 0.5, b = v - 0.5; return [i + 0.5 + T.m[0] * a + T.m[1] * b, j + 0.5 + T.m[2] * a + T.m[3] * b];
+}
 
 function sprite(ctx, img, u, v, w, angle = 0, flip = false, alpha = 1, h = null) {
   if (!img) return;
@@ -324,7 +350,7 @@ const Engine = (() => {
     const p = locate(wx, wy);
     p.px = px; p.py = py; p.k = scale();
     p.button = e.button; p.shift = e.shiftKey; p.type = e.pointerType;
-    p.out = (App.hwall && (wx < 0 || wx > 1)) || (App.vwall && (wy < 0 || wy > 1));
+    p.out = App.custom ? !p.exists : ((App.hwall && (wx < 0 || wx > 1)) || (App.vwall && (wy < 0 || wy > 1)));
     return p;
   }
 
@@ -417,6 +443,7 @@ const Engine = (() => {
     const k = scale(), boxPx = S * view.box;
     const bx = X0 + (S - boxPx) / 2, by = Y0 + (S - boxPx) / 2;
     const bounded = App.hwall || App.vwall;
+    const voidFill = bounded || !!(App.custom && App.custom.hasWalls);       // a gray background where there is no surface
     // "virtual" frame: when a game is drawn transposed, guides are drawn with x and y swapped
     const F = T ? [0, dpr, dpr, 0, 0, 0] : [dpr, 0, 0, dpr, 0, 0];
     const vX0 = T ? Y0 : X0, vY0 = T ? X0 : Y0, vbx = T ? by : bx, vby = T ? bx : by;
@@ -424,7 +451,7 @@ const Engine = (() => {
 
     ctx.save();
     ctx.beginPath(); ctx.rect(bx, by, boxPx, boxPx); ctx.clip();
-    ctx.fillStyle = bounded ? '#808080' : (game.bgColor || '#e9dfc7'); ctx.fillRect(bx, by, boxPx, boxPx);
+    ctx.fillStyle = voidFill ? '#808080' : (game.bgColor || '#e9dfc7'); ctx.fillRect(bx, by, boxPx, boxPx);
     let clipped = false;
     if (bounded) {
       ctx.save(); ctx.setTransform(...F); ctx.beginPath();
@@ -439,7 +466,7 @@ const Engine = (() => {
     const j0 = App.vwall ? 0 : Math.floor(view.cy - half), j1 = App.vwall ? 0 : Math.floor(view.cy + half);
     const tileRange = (a0, a1, b0, b1) => {
       const out = [];
-      for (let j = b0; j <= b1; j++) for (let i = a0; i <= a1; i++) { const f = tileInfo(i, j); out.push({ i, j, fx: f.fx, fy: f.fy, tf: f.tf }); }
+      for (let j = b0; j <= b1; j++) for (let i = a0; i <= a1; i++) { const f = tileInfo(i, j); if (!f.exists) continue; out.push({ i, j, fx: f.fx, fy: f.fy, tf: f.tf, m: f.m }); }
       return out;
     };
     const tiles = tileRange(i0, i1, j0, j1);
@@ -448,9 +475,9 @@ const Engine = (() => {
     const farTiles = reach ? tileRange(App.hwall ? 0 : i0 - Math.ceil(reach), App.hwall ? 0 : i1 + Math.ceil(reach), App.vwall ? 0 : j0 - Math.ceil(reach), App.vwall ? 0 : j1 + Math.ceil(reach)) : tiles;
     const place = t => {
       const aa = t.fx ? -1 : 1, dd = t.fy ? -1 : 1;
-      if (!T) {
-        const ox = X0 + S / 2 + (t.i + (t.fx ? 1 : 0) - view.cx) * k, oy = Y0 + S / 2 + (t.j + (t.fy ? 1 : 0) - view.cy) * k;
-        ctx.setTransform(dpr * k * aa, 0, 0, dpr * k * dd, dpr * ox, dpr * oy);
+      if (!T) {                                           // the tile is the square turned by the 2x2 matrix t.m about its centre
+        const m = t.m, ox = X0 + S / 2 + (t.i + 0.5 - 0.5 * m[0] - 0.5 * m[1] - view.cx) * k, oy = Y0 + S / 2 + (t.j + 0.5 - 0.5 * m[2] - 0.5 * m[3] - view.cy) * k;
+        ctx.setTransform(dpr * k * m[0], dpr * k * m[2], dpr * k * m[1], dpr * k * m[3], dpr * ox, dpr * oy);
       } else {
         const e = X0 + S / 2 + (t.j - view.cy) * k, f = Y0 + S / 2 + (t.i + (t.tf ? 1 : 0) - view.cx) * k;
         ctx.setTransform(0, dpr * k * aa, dpr * k, 0, dpr * e, dpr * f);
@@ -461,6 +488,14 @@ const Engine = (() => {
         ctx.save(); place(t);
         game[layer](ctx, t);
         ctx.restore();
+      }
+    }
+    if (App.custom && App.custom.walls.length) {
+      ctx.strokeStyle = '#000'; ctx.lineCap = 'square';
+      for (const t of tiles) {
+        ctx.save(); place(t); ctx.lineWidth = 5 / k; ctx.beginPath();
+        for (const s of App.custom.walls) { const [[x0, y0], [x1, y1]] = SIDE_REF[s]; ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); }
+        ctx.stroke(); ctx.restore();
       }
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -503,11 +538,16 @@ const Engine = (() => {
       if (homing) {
         const g = 1 - Math.exp(-dt * 8);
         // shortest way home modulo the lattice (keeps Klein parity consistent: home parity = even rows)
-        view.cx += (homing.x + 2 * Math.round((view.cx - homing.x) / 2) - view.cx) * g;
-        const ty = homing.y + 2 * Math.round((view.cy - homing.y) / 2);
+        const per = App.custom ? 4 : 2;      // the unfolding of a general gluing repeats every 4 tiles
+        view.cx += (homing.x + per * Math.round((view.cx - homing.x) / per) - view.cx) * g;
+        const ty = homing.y + per * Math.round((view.cy - homing.y) / per);
         view.cy += (ty - view.cy) * g;
-        const tx = homing.x + 2 * Math.round((view.cx - homing.x) / 2);
+        const tx = homing.x + per * Math.round((view.cx - homing.x) / per);
         if (Math.abs(tx - view.cx) < 0.001 && Math.abs(ty - view.cy) < 0.001) homing = null;
+      }
+      if (App.custom) {
+        if (!App.custom.infinite) { view.cx = App.custom.home[0]; view.cy = App.custom.home[1]; vel.x = vel.y = 0; }
+        else { view.cx = clamp(view.cx, -14, 14); view.cy = clamp(view.cy, -14, 14); }
       }
       if (App.hwall) { view.cx = 0.5; vel.x = 0; }
       if (App.vwall) { view.cy = 0.5; vel.y = 0; }
@@ -529,9 +569,10 @@ const Engine = (() => {
 
 /* status line + message banner helpers used by the games */
 const UI = {
-  panel(html) {
+  panel(html, cls) {              // cls 'tall': on a narrow screen let this panel grow instead of scrolling inside itself
     const p = document.getElementById('panel');
-    if (!html) { p.classList.add('hidden'); p.innerHTML = ''; } else { p.classList.remove('hidden'); p.innerHTML = html; }
+    p.className = 'panel' + (cls ? ' ' + cls : '');
+    if (!html) { p.classList.add('hidden'); p.innerHTML = ''; } else { p.innerHTML = html; }
     requestAnimationFrame(() => Engine.resize());
   },
   status(html) { document.getElementById('status').innerHTML = html; },
@@ -1730,8 +1771,9 @@ Touching a ghost when it isn't blue costs a life. You have three lives. <b>Space
 
 
 'use strict';
-/* Practice board: push Pac-Man, the mouse and the word FLATLAND through the edges and see how each one comes back. */
-Games.push((() => {
+/* Practice board: push Pac-Man, the mouse and the word FLATLAND through the edges and see how each one comes back.
+   The board is built by a factory so that the "Glue the Edges" game can reuse the same pieces. */
+function makePracticeBoard(cfg = {}) {
   let items = [], held = null, tA = 0;
   const WORD = 'FLATLAND', BOX = 0.09;
   const SPEC = () => [
@@ -1755,8 +1797,12 @@ Games.push((() => {
     if (o.kind === 'word') return (axis === 'x' ? o.w : o.h) / 2 + 0.003;
     return (o.kind === 'pac' ? o.r : o.size * 0.5) + 0.003;
   }
+  const mulM = (A, B) => [A[0] * B[0] + A[1] * B[2], A[0] * B[1] + A[1] * B[3], A[2] * B[0] + A[3] * B[2], A[2] * B[1] + A[3] * B[3]];      // 2x2 matrices as [m00,m01,m10,m11]
+  const transM = A => [A[0], A[2], A[1], A[3]];
+  const ID = [1, 0, 0, 1];
   function draw(ctx, o) {
-    ctx.save(); ctx.translate(o.u, o.v); ctx.scale(o.ox ? -1 : 1, o.oy ? -1 : 1);
+    const m = o.m || ID;
+    ctx.save(); ctx.translate(o.u, o.v); ctx.transform(m[0], m[2], m[1], m[3], 0, 0);
     if (o.kind === 'pac') {
       const moving = held && held.o === o;
       drawPacShape(ctx, 0, 0, o.r, o.fw, moving ? 0.04 + 0.28 * Math.abs(Math.sin(tA * 14)) : 0.2);
@@ -1789,8 +1835,25 @@ Games.push((() => {
 <li><b>Projective Plane:</b> <em>every</em> edge is joined with a half-twist. Push a piece off the right side and it comes back on the left, flipped top-to-bottom. In the Repeating view, neighboring copies of the board are mirrored or upside-down.</li>
 </ul>
 <p>Pac-Man and the mouse face the way you last pushed them.</p>`,
-    enter() { this.reset(); },
-    reset() { items = SPEC().map(o => ({ ...o, ox: false, oy: false })); held = null; UI.status(STATUS[App.topology]); },
+    enter() { if (cfg.enter) cfg.enter(this); this.reset(); },
+    leave() { if (cfg.leave) cfg.leave(this); },
+    reset() {
+      items = SPEC().map(o => ({ ...o, ox: false, oy: false, m: ID })); held = null;
+      UI.status(cfg.status ? cfg.status() : STATUS[CANON[App.topology] || App.topology]);
+      if (cfg.afterReset) cfg.afterReset(this);
+    },
+    // after the surface is changed under the pieces: keep them where they are, but inside any new walls and un-turned
+    // put the pieces back where they start (always inside the first copy of the board)
+    rehome() { items = SPEC().map(o => ({ ...o, ox: false, oy: false, m: ID })); held = null; },
+    refit() {
+      for (const o of items) {
+        o.ox = false; o.oy = false; o.m = ID;
+        const hx = extent(o, 'x'), hy = extent(o, 'y');
+        if (App.hwall) o.u = clamp(o.u, hx, 1 - hx);
+        if (App.vwall) o.v = clamp(o.v, hy, 1 - hy);
+      }
+      held = null;
+    },
     bg(ctx) {
       ctx.fillStyle = '#05061c'; ctx.fillRect(-0.002, -0.002, 1.004, 1.004);
       ctx.fillStyle = '#2b3a8c';
@@ -1804,34 +1867,298 @@ Games.push((() => {
         const o = items[k];
         for (let dj = (App.vwall ? 0 : -1); dj <= (App.vwall ? 0 : 1); dj++) for (let di = (App.hwall ? 0 : -1); di <= (App.hwall ? 0 : 1); di++) {
           const i = App.hwall ? 0 : p.i + di, j = App.vwall ? 0 : p.j + dj, T = tileInfo(i, j);
+          if (!T.exists) continue;
+          const C = mulM(T.m, o.m || ID);                        // how this copy is turned in the picture
           const [wx, wy] = toWorld(i, j, o.u, o.v), dx = Math.abs(wx - p.wx), dy = Math.abs(wy - p.wy);
-          const inside = o.kind === 'word' ? (dx <= o.w / 2 && dy <= o.h / 2) : Math.hypot(dx, dy) <= o.hit;
-          if (inside && dx + dy < bd) { bd = dx + dy; best = { o, wx, wy, T }; }
+          const inside = o.kind === 'word' ? (dx <= Math.abs(C[0]) * o.w / 2 + Math.abs(C[1]) * o.h / 2 && dy <= Math.abs(C[2]) * o.w / 2 + Math.abs(C[3]) * o.h / 2) : Math.hypot(dx, dy) <= o.hit;
+          if (inside && dx + dy < bd) { bd = dx + dy; best = { o, wx, wy, C }; }
         }
       }
       if (!best) return false;
       const o = best.o;
       items.splice(items.indexOf(o), 1); items.push(o);
-      // the picture's orientation in the plane while it is carried: (tile flips of the copy we grabbed) combined with the piece's own
-      held = { o, wx: best.wx, wy: best.wy, ox: p.wx, oy: p.wy, mx: best.T.fx !== o.ox, my: best.T.fy !== o.oy };
+      // the picture's orientation in the plane while it is carried: (the turn of the copy we grabbed) combined with the piece's own
+      held = { o, wx: best.wx, wy: best.wy, ox: p.wx, oy: p.wy, C: best.C };
       return true;
     },
     pointerMove(p) {
       if (!held) return;
       const dx = p.wx - held.ox, dy = p.wy - held.oy;
+      held.wx0 = held.wx; held.wy0 = held.wy;
       held.wx += dx; held.wy += dy; held.ox = p.wx; held.oy = p.wy;
-      const hx = extent(held.o, 'x'), hy = extent(held.o, 'y');      // half the piece's width / height
-      if (App.hwall) held.wx = clamp(held.wx, hx, 1 - hx);
-      if (App.vwall) held.wy = clamp(held.wy, hy, 1 - hy);
-      const L = locate(held.wx, held.wy), o = held.o;
-      o.u = L.u; o.v = L.v; o.ox = held.mx !== L.fx; o.oy = held.my !== L.fy;
-      if (Math.hypot(dx, dy) > 1e-5 && o.kind !== 'word') o.fw = Math.atan2(held.my ? -dy : dy, held.mx ? -dx : dx);   // faces the way it is pushed, as seen in the picture
+      const o = held.o, C = held.C;
+      if (App.custom) {
+        // a surface with walls made by the gluing game: the piece (as drawn, turned by C) must stay on squares that exist
+        const ex = o.kind === 'word' ? Math.abs(C[0]) * o.w / 2 + Math.abs(C[1]) * o.h / 2 : extent(o, 'x'), ey = o.kind === 'word' ? Math.abs(C[2]) * o.w / 2 + Math.abs(C[3]) * o.h / 2 : extent(o, 'y');
+        const fits = (x, y) => { for (let j = Math.floor(y - ey); j <= Math.floor(y + ey - 1e-9); j++) for (let i = Math.floor(x - ex); i <= Math.floor(x + ex - 1e-9); i++) if (!tileInfo(i, j).exists) return false; return true; };
+        const nx = held.wx0 + dx, ny = held.wy0 + dy;           // where the piece would go
+        if (fits(nx, ny)) { held.wx = nx; held.wy = ny; } else if (fits(nx, held.wy0)) { held.wx = nx; held.wy = held.wy0; } else if (fits(held.wx0, ny)) { held.wx = held.wx0; held.wy = ny; } else { held.wx = held.wx0; held.wy = held.wy0; }
+      } else {
+        const hx = extent(o, 'x'), hy = extent(o, 'y');          // half the piece's width / height
+        if (App.hwall) held.wx = clamp(held.wx, hx, 1 - hx);
+        if (App.vwall) held.wy = clamp(held.wy, hy, 1 - hy);
+      }
+      const L = locate(held.wx, held.wy);
+      o.u = L.u; o.v = L.v;
+      o.m = mulM(transM(L.m), C);                                // the piece's own turn = the inverse of the copy's turn, then the carried picture
+      o.ox = o.m[1] === 0 && o.m[0] < 0; o.oy = o.m[1] === 0 && o.m[3] < 0;
+      if (Math.hypot(dx, dy) > 1e-5 && o.kind !== 'word') o.fw = Math.atan2(C[1] * dx + C[3] * dy, C[0] * dx + C[2] * dy);   // faces the way it is pushed, as seen in the picture
     },
     pointerUp() { held = null; }, pointerCancel() { held = null; },
-    dbg() { return { items }; },
+    dbg() { return { items, get held() { return held; } }; },
   };
+  Object.assign(g, cfg.override || {});
   return g;
-})());
+}
+Games.push(makePracticeBoard());
+
+
+'use strict';
+/*
+ * Glue the Edges: build a surface by choosing how the edges of a square are joined, in the way mathematicians draw it.
+ * The four edges are paired up in one of three ways (opposite edges; left-bottom with top-right; bottom-right with top-left),
+ * and each pair can be a WALL (not joined), GLUED, or GLUED WITH A TWIST. That gives 25 different patterns that make 7 different
+ * surfaces. The board beside the diagram is the surface you built: the Practice Board's pieces on the same engine as every game.
+ *
+ * The mathematics is below: classify() names a pattern by counting (Euler characteristic, edges, one- or two-sidedness), and
+ * develop() unfolds it into the tiling of the plane that the board draws: neighboring copies of the square are found by
+ * crossing glued edges, and each copy is the square turned by one of its 8 symmetries.
+ */
+(() => {
+  const STATES = ['wall', 'plain', 'twist'];
+  const LABEL = { wall: 'Wall', plain: 'Glue', twist: 'Glue with a twist' };
+  const KEY = {}; for (const [k, [lr, tb]] of Object.entries(GLUE)) if (k !== 'custom') KEY[lr + '/' + tb] = k;
+  const BLUE = '#1c7ed6', PINK = '#d6336c';
+
+  /* ---------- the mathematics ---------- */
+  const SIDE_ENDS = { B: ['BL', 'BR'], R: ['BR', 'TR'], T: ['TR', 'TL'], L: ['TL', 'BL'] };    // the sides in counter-clockwise order, start -> end
+  const CORNERS = ['BL', 'BR', 'TR', 'TL'];
+  const CCW_SIGN = { B: 1, L: 1, R: -1, T: -1 };       // does the reference direction of a side (SIDE_REF) agree with counter-clockwise travel?
+  const CCW_DIR = { B: [1, 0], R: [0, -1], T: [-1, 0], L: [0, 1] };          // direction of travel round the boundary, as drawn on the screen
+  const NORMAL = { L: [-1, 0], R: [1, 0], T: [0, -1], B: [0, 1] };
+  const PAIRINGS = { opposite: [['R', 'L'], ['B', 'T']], adjA: [['L', 'B'], ['R', 'T']], adjB: [['B', 'R'], ['T', 'L']] };
+  const PAIR_NAMES = { opposite: ['Left &amp; right', 'Top &amp; bottom'], adjA: ['Left &amp; bottom', 'Right &amp; top'], adjB: ['Bottom &amp; right', 'Top &amp; left'] };
+  const D4 = [[1, 0, 0, 1], [1, 0, 0, -1], [-1, 0, 0, 1], [-1, 0, 0, -1], [0, 1, 1, 0], [0, 1, -1, 0], [0, -1, 1, 0], [0, -1, -1, 0]];
+  const near = (a, b) => Math.abs(a - b) < 1e-9;
+  const mv = (M, p) => [M[0] * p[0] + M[1] * p[1], M[2] * p[0] + M[3] * p[1]];
+  const mm = (A, B) => [A[0] * B[0] + A[1] * B[2], A[0] * B[1] + A[1] * B[3], A[2] * B[0] + A[3] * B[2], A[2] * B[1] + A[3] * B[3]];
+  const sidePt = (side, s) => { const [[x0, y0], [x1, y1]] = SIDE_REF[side]; return [x0 + (x1 - x0) * s, y0 + (y1 - y0) * s]; };
+
+  function classify(pairing, s1, s2) {
+    const pairs = PAIRINGS[pairing].map((p, k) => [p, [s1, s2][k]]);
+    const parent = {}; CORNERS.forEach(c => { parent[c] = c; });
+    const find = x => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    const union = (a, b) => { parent[find(a)] = find(b); };
+    const walls = [], glued = [];
+    for (const [[x, y], st] of pairs) {
+      if (st === 'wall') { walls.push(x, y); continue; }
+      glued.push(st);
+      const [ax, bx] = SIDE_ENDS[x], [ay, by] = SIDE_ENDS[y];
+      if (st === 'plain') { union(ax, by); union(bx, ay); } else { union(ax, ay); union(bx, by); }      // a ... a^-1  versus  a ... a
+    }
+    const V = new Set(CORNERS.map(find)).size, E = glued.length + walls.length, chi = V - E + 1;
+    const comp = {}, find2 = x => { if (!(x in comp)) comp[x] = x; while (comp[x] !== x) { comp[x] = comp[comp[x]]; x = comp[x]; } return x; };
+    for (const w of walls) { const [a, b] = SIDE_ENDS[w]; comp[find2(find(a))] = find2(find(b)); }
+    const boundary = new Set(walls.map(w => find2(find(SIDE_ENDS[w][0])))).size;
+    const orientable = glued.every(s => s === 'plain');
+    let name;
+    if (orientable) name = ({ '0,2': 'Sphere', '0,0': 'Torus', '1,1': 'Disk', '2,0': 'Cylinder' })[boundary + ',' + chi];
+    else name = ({ '0,1': 'Projective Plane', '0,0': 'Klein Bottle', '1,0': 'Mobius Loop' })[boundary + ',' + chi];
+    const groups = {}; CORNERS.forEach(c => { groups[find(c)] = (groups[find(c)] || 0) + 90; });      // 90 degrees at each corner of the square
+    return { chi, boundary, orientable, name: name || 'Other', angles: Object.values(groups).sort((a, b) => a - b), V, E };
+  }
+  function edgeIso(X, Y, st) {      // the isometry taking the square to the copy lying across side X, so that side Y lands on side X, glued as stated
+    const toCcw = (side, s) => CCW_SIGN[side] === 1 ? s : 1 - s, fromCcw = (side, t) => CCW_SIGN[side] === 1 ? t : 1 - t;
+    const pts = [0, 1].map(s => { const tx = toCcw(X, s), ty = st === 'plain' ? 1 - tx : tx; return [sidePt(X, s), sidePt(Y, fromCcw(Y, ty))]; });
+    const [[q0, p0], [q1, p1]] = pts, want = [0.5 + NORMAL[X][0], 0.5 + NORMAL[X][1]];
+    for (const M of D4) {
+      const d = mv(M, [p1[0] - p0[0], p1[1] - p0[1]]);
+      if (!near(d[0], q1[0] - q0[0]) || !near(d[1], q1[1] - q0[1])) continue;
+      const mp = mv(M, p0), t = [q0[0] - mp[0], q0[1] - mp[1]], c = mv(M, [0.5, 0.5]);
+      if (near(c[0] + t[0], want[0]) && near(c[1] + t[1], want[1])) return { M, t };
+    }
+    throw new Error('no isometry');
+  }
+  function develop(pairing, s1, s2, R = 14) {
+    const partner = {};
+    PAIRINGS[pairing].forEach(([x, y], k) => { const st = [s1, s2][k]; if (st !== 'wall') { partner[x] = [y, st]; partner[y] = [x, st]; } });
+    const isos = {}; for (const X in partner) isos[X] = edgeIso(X, partner[X][0], partner[X][1]);
+    const tiles = new Map([['0,0', { m: [1, 0, 0, 1], t: [0, 0] }]]), queue = [[0, 0]];
+    let conflict = false, infinite = false;
+    for (let q = 0; q < queue.length; q++) {
+      const [i, j] = queue[q], { m: M, t } = tiles.get(i + ',' + j);
+      for (const X in isos) {
+        const { M: MA, t: tA } = isos[X], M2 = mm(M, MA), mt = mv(M, tA), t2 = [mt[0] + t[0], mt[1] + t[1]], c0 = mv(M2, [0.5, 0.5]);
+        const cx = c0[0] + t2[0], cy = c0[1] + t2[1], ki = Math.round(cx - 0.5), kj = Math.round(cy - 0.5);
+        if (!near(cx - 0.5, ki) || !near(cy - 0.5, kj)) throw new Error('not on the grid');
+        if (Math.max(Math.abs(ki), Math.abs(kj)) > R) { infinite = true; continue; }
+        const old = tiles.get(ki + ',' + kj);
+        if (old) { if (old.m.some((v, n) => v !== M2[n]) || !near(old.t[0], t2[0]) || !near(old.t[1], t2[1])) conflict = true; }
+        else { tiles.set(ki + ',' + kj, { m: M2, t: t2 }); queue.push([ki, kj]); }
+      }
+    }
+    let home = [0.5, 0.5];
+    if (!infinite) {                                   // a bounded piece of surface: centre the view on it
+      const is = [...tiles.keys()].map(k => +k.split(',')[0]), js = [...tiles.keys()].map(k => +k.split(',')[1]);
+      home = [(Math.min(...is) + Math.max(...is) + 1) / 2, (Math.min(...js) + Math.max(...js) + 1) / 2];
+    }
+    return { tiles, conflict, infinite, home };
+  }
+
+  /* ---------- what each surface is called, and what is true of it ---------- */
+  const COLORS = { Disk: 4, Cylinder: 4, 'Mobius Loop': 6, Torus: 7, 'Klein Bottle': 6, 'Projective Plane': 6, Sphere: 4 };
+  const FALLBACK = { Disk: 'square', Cylinder: 'cylinder', 'Mobius Loop': 'mobius', Torus: 'torus', 'Klein Bottle': 'klein', 'Projective Plane': 'projective', Sphere: 'square' };
+  const MENU_NAME = { Disk: 'Square', Cylinder: 'Cylinder', 'Mobius Loop': 'M&ouml;bius Loop', Torus: 'Torus', 'Klein Bottle': 'Klein Bottle', 'Projective Plane': 'Projective Plane' };
+  const canon = k => CANON[k] || k;
+  let board, prevView = null, pairing = 'opposite', s1 = 'wall', s2 = 'wall', blocked = false;
+
+  function displayName(cl) {
+    if (cl.name === 'Disk') return (s1 === 'wall' && s2 === 'wall') ? 'Square' : 'Cone';
+    return MENU_NAME[cl.name] || cl.name;
+  }
+  const SIDE_WORD = { L: 'left', R: 'right', T: 'top', B: 'bottom' };
+  function describe() {
+    const parts = PAIRINGS[pairing].map(([x, y], k) => {
+      const st = [s1, s2][k], a = SIDE_WORD[x], b = SIDE_WORD[y];
+      if (st === 'wall') return `The ${a} and ${b} edges are walls.`;
+      if (pairing === 'opposite') {
+        return st === 'plain' ? `Leave through the ${a} or ${b} edge and you come back on the opposite side.`
+          : `Leave through the ${a} or ${b} edge and you come back on the opposite side, flipped ${k === 0 ? 'upside-down' : 'left-to-right (mirror-reversed)'}.`;
+      }
+      return st === 'plain' ? `The ${a} and ${b} edges are glued together at their shared corner, like zipping up a cone: leave through one and you come back through the other.`
+        : `The ${a} and ${b} edges are glued together the other way round (a twist): leave through one and you come back through the other, mirror-reversed.`;
+    });
+    return parts.join(' ');
+  }
+  function angleText(cl) {
+    if (cl.boundary > 0) return '';
+    const missing = cl.angles.reduce((t, a) => t + (360 - a), 0);
+    if (!missing) return 'The corners all meet at one point and add up to a full 360&deg;: nothing is missing, so the surface is flat all over.';
+    return `The four corners meet in groups adding up to ${cl.angles.join('&deg;, ')}&deg;. A flat point needs 360&deg;, so ${missing}&deg; is missing in total: exactly 360&deg; &times; ${cl.chi}.`;
+  }
+
+  /* ---------- the diagram: the square with an arrow pattern on each edge ---------- */
+  function diagram() {
+    const X0 = 55, X1 = 205, Y0 = 45, Y1 = 195, cx = 130, cy = 120;
+    const GEOM = { B: [[X0, Y1], [X1, Y1]], R: [[X1, Y1], [X1, Y0]], T: [[X1, Y0], [X0, Y0]], L: [[X0, Y0], [X0, Y1]] };
+    const tri = (x, y, d, col) => {
+      const s = 11, px = -d[1], py = d[0], P = [[x + d[0] * s, y + d[1] * s], [x - d[0] * s * 0.8 + px * s, y - d[1] * s * 0.8 + py * s], [x - d[0] * s * 0.8 - px * s, y - d[1] * s * 0.8 - py * s]];
+      return `<polygon points="${P.map(p => p.map(v => v.toFixed(1)).join(',')).join(' ')}" fill="${col}"/>`;
+    };
+    const info = {};
+    PAIRINGS[pairing].forEach(([x, y], k) => { const st = [s1, s2][k]; info[x] = { k, st, sign: 1 }; info[y] = { k, st, sign: st === 'plain' ? -1 : 1 }; });
+    let svg = `<svg viewBox="0 0 260 240" width="100%" role="img" aria-label="The square with its edges paired ${PAIR_NAMES[pairing].join(' and ').replace(/&amp;/g, 'and')}" style="display:block;max-width:200px;margin:0 auto">`;
+    svg += `<rect x="${X0}" y="${Y0}" width="${X1 - X0}" height="${Y1 - Y0}" fill="#f4f4ee"/>`;
+    let arrows = '', hits = '';
+    for (const side of ['B', 'R', 'T', 'L']) {
+      const { k, st, sign } = info[side], [[ax, ay], [bx, by]] = GEOM[side], col = k === 0 ? BLUE : PINK;
+      svg += `<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="${st === 'wall' ? '#111' : col}" stroke-width="${st === 'wall' ? 8 : 5}" stroke-linecap="square"/>`;
+      if (st !== 'wall') {
+        const mx = (ax + bx) / 2, my = (ay + by) / 2, d = [CCW_DIR[side][0] * sign, CCW_DIR[side][1] * sign], e = CCW_DIR[side];
+        if (k === 0) arrows += tri(mx, my, d, col); else arrows += tri(mx - 14 * e[0], my - 14 * e[1], d, col) + tri(mx + 14 * e[0], my + 14 * e[1], d, col);
+      }
+      const horiz = side === 'B' || side === 'T';
+      hits += `<rect x="${horiz ? X0 : (side === 'L' ? X0 : X1) - 15}" y="${horiz ? (side === 'T' ? Y0 : Y1) - 15 : Y0}" width="${horiz ? X1 - X0 : 30}" height="${horiz ? 30 : Y1 - Y0}" fill="transparent" style="cursor:pointer" data-pair="${k}" tabindex="0" role="button" aria-label="${SIDE_WORD[side]} edge: click to change how the ${PAIR_NAMES[pairing][k].replace(/&amp;/g, 'and').toLowerCase()} edges are joined"/>`;
+    }
+    svg += arrows;
+    svg += `<path d="M${cx} ${cy} L${cx + 14} ${cy - 8} A16 16 0 1 0 ${cx + 14} ${cy + 8} Z" fill="#ffe600" stroke="#8a6d00" stroke-width="1"/>` + hits;
+    svg += `<text x="${X0 - 40}" y="${cy + 4}" font-size="11" fill="#555" font-family="Arial" text-anchor="middle">left</text><text x="${X1 + 38}" y="${cy + 4}" font-size="11" fill="#555" font-family="Arial" text-anchor="middle">right</text>`;
+    svg += `<text x="${cx}" y="${Y0 - 22}" font-size="11" fill="#555" font-family="Arial" text-anchor="middle">top</text><text x="${cx}" y="${Y1 + 28}" font-size="11" fill="#555" font-family="Arial" text-anchor="middle">bottom</text></svg>`;
+    return svg;
+  }
+
+  /* ---------- the panel ---------- */
+  function renderPanel() {
+    const cl = classify(pairing, s1, s2), nm = displayName(cl), tippedOpp = pairing === 'opposite' && !!CANON[App.topology && KEY[s1 + '/' + s2]];
+    const radios = (name, cur, color) => STATES.map(s => `<label style="display:block;font-size:12.5px"><input type="radio" name="${name}" value="${s}"${s === cur ? ' checked' : ''}> ${LABEL[s]}</label>`).join('');
+    const sameAs = pairing !== 'opposite' && MENU_NAME[cl.name] && nm !== 'Square' && nm !== 'Cone' ? `<br><em>The same surface as the ${nm} in the Surface menu, but made by gluing neighboring edges!</em>` : '';
+    const note = cl.name === 'Sphere' ? '<br><em>You cannot make a sphere by gluing opposite edges. It needs neighboring edges.</em>'
+      : nm === 'Cone' ? '<br><em>A cone is still a disk, like the Square, but with a pointy tip.</em>'
+        : tippedOpp ? `<br><em>The same shape as the ${nm} in the Surface menu, tipped on its side.</em>` : sameAs;
+    const edges = cl.boundary === 0 ? 'no edge at all' : cl.boundary === 1 ? (cl.name === 'Mobius Loop' ? '1 edge (a twisted strip has only one!)' : '1 edge, all the way around') : `${cl.boundary} edges (a loop at each end)`;
+    const fall = App.custom ? App.custom.fallback : null;
+    UI.panel(`<h3 style="margin-bottom:2px">Glue the edges</h3>
+      ${diagram()}
+      <p class="note" style="margin:2px 0 6px;text-align:center">Click an edge to change it. Same-way arrows: glue. Opposite arrows: twist. Black: wall.</p>
+      <p style="margin:0 0 4px"><label><b>Edges go together:</b> <select id="gl-pairing" style="font-size:12.5px">
+        <option value="opposite"${pairing === 'opposite' ? ' selected' : ''}>Opposite edges</option>
+        <option value="adjA"${pairing === 'adjA' ? ' selected' : ''}>Left-bottom and right-top</option>
+        <option value="adjB"${pairing === 'adjB' ? ' selected' : ''}>Bottom-right and top-left</option></select></label></p>
+      <div style="display:flex;gap:12px">
+        <div style="flex:1"><b style="color:${BLUE}">${PAIR_NAMES[pairing][0]}</b>${radios('gl-p1', s1)}</div>
+        <div style="flex:1"><b style="color:${PINK}">${PAIR_NAMES[pairing][1]}</b>${radios('gl-p2', s2)}</div>
+      </div>
+      <div class="think" style="margin-top:8px;font-size:12.5px">
+        <b style="font-size:14px">You built ${/^[AEIOU]/.test(nm) ? 'an' : 'a'} ${nm}.</b>${note}
+        <p style="margin:4px 0">${describe()}</p>
+        <p style="margin:4px 0">Edges: <b>${edges}</b><br>Sides: <b>${cl.orientable ? 'two-sided' : 'one-sided'}</b> &nbsp;&middot;&nbsp; Colors a map needs: <b>${COLORS[cl.name]}</b></p>
+        ${angleText(cl) ? `<p style="margin:4px 0">${angleText(cl)}</p>` : ''}
+      </div>
+      ${blocked ? `<div style="margin-top:6px;padding:6px;border:2px solid #a00;background:#fee;font-size:12.5px"><b>The board cannot show this one.</b> Its corners add up to 90&deg; and 270&deg;, and a 270&deg; corner cannot be tiled flat with squares. The board is still showing your last surface. (Gluing opposite edges with two twists makes this same surface, and the board can show that!)</div>` : ''}
+      <p style="margin:6px 0 2px"><b>Play on this surface</b></p>
+      <p style="margin:2px 0">${[['tictactoe', 'Tic-Tac-Toe'], ['maze', 'Maze'], ['colorize', 'Colorize'], ['pacman', 'Pac-Man'], ['launcher', 'Launcher'], ['snake', 'Snake'], ['wordsearch', 'Word Search']].map(([id, n]) => `<button type="button" class="gl-go" data-g="${id}" style="min-width:0;padding:1px 7px;margin:0 3px 3px 0;font-size:12px">${n}</button>`).join('')}</p>
+      ${(tippedOpp || App.custom || blocked || cl.name === 'Sphere') ? `<p class="note" style="margin:2px 0">Those games use the standard version: the ${MENU_NAME[cl.name] || 'Square'}${cl.name === 'Sphere' ? ' (they cannot play on a sphere yet)' : ''}.</p>` : ''}`, 'tall');
+    document.getElementById('gl-pairing').onchange = e => { pairing = e.target.value; apply(); };
+    document.querySelectorAll('#panel input[name="gl-p1"]').forEach(r => { r.onchange = () => { s1 = r.value; apply(); }; });
+    document.querySelectorAll('#panel input[name="gl-p2"]').forEach(r => { r.onchange = () => { s2 = r.value; apply(); }; });
+    document.querySelectorAll('#panel [data-pair]').forEach(e => {
+      const go = () => { const cycle = s => STATES[(STATES.indexOf(s) + 1) % 3]; if (e.dataset.pair === '0') s1 = cycle(s1); else s2 = cycle(s2); apply(); };
+      e.onclick = go; e.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } };
+    });
+    document.querySelectorAll('#panel .gl-go').forEach(b => { b.onclick = () => selectGame(b.dataset.g); });
+  }
+  function status() {
+    const cl = classify(pairing, s1, s2), nm = displayName(cl).replace('&ouml;', '\u00f6');
+    UI.status(`${PAIR_NAMES[pairing][0].replace('&amp;', '&')}: <b>${LABEL[s1]}</b> &nbsp;|&nbsp; ${PAIR_NAMES[pairing][1].replace('&amp;', '&')}: <b>${LABEL[s2]}</b> &nbsp;=&nbsp; <b>${nm}</b>${blocked ? ' &nbsp;|&nbsp; <b style="color:#a00">cannot be drawn on the board</b>' : ' &nbsp;|&nbsp; drag the pieces through the edges'}`);
+  }
+  // apply the chosen pattern to the board
+  function apply() {
+    const cl = classify(pairing, s1, s2), wasCustom = !!App.custom, allWall = s1 === 'wall' && s2 === 'wall';
+    blocked = false;
+    if (pairing === 'opposite' || allWall) {
+      App.custom = null; App.topology = KEY[(pairing === 'opposite' ? s1 : 'wall') + '/' + (pairing === 'opposite' ? s2 : 'wall')]; board.home = [0.5, 0.5];
+    } else {
+      const dev = develop(pairing, s1, s2);
+      if (dev.conflict) blocked = true;
+      else {
+        const walls = []; PAIRINGS[pairing].forEach(([x, y], k) => { if ([s1, s2][k] === 'wall') walls.push(x, y); });
+        App.custom = { tiles: dev.tiles, walls, hasWalls: walls.length > 0, infinite: dev.infinite, home: dev.home, fallback: FALLBACK[cl.name] };
+        App.topology = 'custom'; board.home = dev.home;
+      }
+    }
+    syncSurfaceRadios();
+    if (!blocked) { if (wasCustom || App.custom) board.rehome(); else board.refit(); Engine.goHome(true); }
+    UI.banner(''); renderPanel(); status();
+  }
+  function fromApp() {                      // the Surface menu was used: the diagram follows it
+    if (App.custom) return;
+    pairing = 'opposite'; s1 = App.lr; s2 = App.tb; blocked = false; board.home = [0.5, 0.5];
+  }
+
+  board = makePracticeBoard({
+    status: () => 'Choose how the edges are joined in the panel, then drag Pac-Man, the mouse and the word through the edges.',
+    afterReset: () => { fromApp(); renderPanel(); status(); },
+    enter: () => { prevView = App.view; Engine.setViewMode('repeat'); setChecked('view', 'repeat'); },       // the Repeating view shows the gluing best
+    leave: () => { if (prevView && prevView !== 'repeat') { Engine.setViewMode(prevView); setChecked('view', prevView); } },
+    override: {
+      id: 'glue', name: 'Glue the Edges', order: 0.5, blurb: 'Build a surface by gluing a square',
+      opts: { reset: 'Reset pieces' },
+      help: `<p>Every surface in this site can be made from a <b>square</b> by deciding what happens at its edges. Here you do the gluing yourself.</p>
+<p>First choose which edges <b>go together</b>: opposite edges (left with right, top with bottom), or <em>neighboring</em> edges (for example left with bottom, and right with top). Each pair of edges can then be:</p>
+<ul><li><b>Wall</b> &mdash; not joined. A piece stops at the edge.</li>
+<li><b>Glue</b> &mdash; joined. Leave through one edge and you come back through the other. For neighboring edges this is like <em>zipping up</em> the corner into a cone.</li>
+<li><b>Glue with a twist</b> &mdash; joined after a half-twist, like a M&ouml;bius strip. You come back <em>mirror-reversed</em>.</li></ul>
+<p>Click an edge in the diagram (or use the buttons) to change it. The board shows the surface you built; the <b>Repeating</b> view is on so you can see the same pieces in every copy. Drag Pac-Man, the mouse or the word FLATLAND through an edge. With neighboring edges, pieces come back <b>turned</b> by a quarter-turn!</p>
+<p>There are 25 different gluings but only <b>seven different surfaces</b>: a flat disk (the square, or a <em>cone</em>), the cylinder, the M&ouml;bius loop, the torus, the Klein bottle, the projective plane and the <b>sphere</b>. Which gluings make the same surface? Which surface can you only make with neighboring edges? Which have no edge, and which are one-sided?</p>
+<p>When a surface has no edge, the panel adds up the corner angles of the square. A flat surface has 360&deg; at every point. For the sphere, the missing angle adds up to 720&deg; = 360&deg; &times; 2. For a torus, nothing is missing: it is flat.</p>
+<p>The panel also tells you how many <b>colors</b> a map on your surface can need (see <b>Colorize</b>), and lets you jump to any other game on your surface. One gluing, the projective plane made from neighboring edges, has a 270&deg; corner that cannot be drawn flat; the panel tells you when you reach it.</p>`,
+    },
+  });
+  const baseDbg = board.dbg;
+  board.dbg = () => ({ ...baseDbg(), setGlue: (lr, tb) => { pairing = 'opposite'; s1 = lr; s2 = tb; apply(); }, setPattern: (p, a, b) => { pairing = p; s1 = a; s2 = b; apply(); },
+    state: () => ({ pairing, s1, s2, blocked }), Glue: { classify, develop, PAIRINGS, displayName }, KEY });
+  Games.push(board);
+})();
 
 
 'use strict';
@@ -2424,6 +2751,8 @@ Switch the <b>View</b> to <b>Repeating</b> to see it: the board is tiled over an
 In the <b>Repeating</b> view, neighboring copies of the board are mirrored, or even upside-down.</p>
 <p>A fun fact: unlike the other surfaces, the Projective Plane cannot be built flat without pinching. Its four corners are special points where the surface is pinched to half a full turn &mdash; a traveler who walks straight through one comes out turned around.</p>
 <div class="think"><b>Think about it:</b> How many different copies of your piece can you see in the Repeating view? On which surfaces can you go in a straight line and come back to where you started? Why does a M&ouml;bius Loop have walls at the sides but a Klein Bottle does not? What is different about the Projective Plane?</div>
+<h4>Build your own</h4>
+<p>Every surface here can be made from a square by choosing what happens at its edges. In the game <b>Glue the Edges</b> you do the gluing yourself: pair up the edges (opposite ones, or neighboring ones such as left with bottom), and make each pair a wall, a glue, or a glue with a twist. There are 25 different gluings but only seven different surfaces &mdash; including the <b>sphere</b> and the <b>cone</b>, which need neighboring edges. Which gluings turn out to make the same surface?</p>
 <h4>Scrolling</h4>
 <p>Drag the empty background to scroll (or use a trackpad / mouse wheel). On touch screens, drag with one finger. The <b>Re-center</b> button brings the board back to its starting position.</p>
 `;
@@ -2431,7 +2760,7 @@ const ABOUT_HTML = `
 <p><b>Torus Games &mdash; web edition.</b> This is a browser version of the Torus Games by <b>Jeff Weeks</b>
 (<a href="https://www.geometrygames.org/TorusGames" target="_blank" rel="noopener">geometrygames.org/TorusGames</a>),
 re-implemented in JavaScript from the original GPL-licensed source code so it can be played in a class on any device.</p>
-<p><b>New in this edition:</b> the Square, Cylinder, M\u00f6bius Loop and Projective Plane surfaces, and the games Colorize, Pac-Man, Pac-Man Launcher, Snake and a new Word Search, were added for this web version and are not part of the original program.</p>
+<p><b>New in this edition:</b> the Square, Cylinder, M\u00f6bius Loop and Projective Plane surfaces, and the games Glue the Edges, Colorize, Pac-Man, Pac-Man Launcher, Snake and a new Word Search, were added for this web version and are not part of the original program.</p>
 <p>The game rules, the Klein Bottle conventions and the original artwork (the mouse, the cheese, the X and O) come from the original program.</p>
 <p>The program is free software: you may redistribute it and/or modify it under the terms of the
 <a href="https://www.gnu.org/licenses/old-licenses/gpl-2.0.html" target="_blank" rel="noopener">GNU General Public License</a>, version 2 or (at your option) any later version.
@@ -2463,6 +2792,10 @@ function radioGroup(containerId, name, items, checked) {
     `<label${tip ? ` title="${tip}"` : ''}><input type="radio" name="${name}" value="${v}" data-v="${v}"${v === checked ? ' checked' : ''}> ${label}</label>`).join(' ');
 }
 function setChecked(name, value) { const r = document.querySelector(`input[name="${name}"][value="${value}"]`); if (r) r.checked = true; }
+const CANON = { cylinder2: 'cylinder', mobius2: 'mobius', klein2: 'klein' };    // the tipped-over versions of three surfaces
+function syncSurfaceRadios() {                       // show which surface is active; none is ticked for a tipped-over one
+  document.querySelectorAll('input[name="topo"]').forEach(r => { r.checked = (r.value === App.topology); });
+}
 function setEnabled(containerId, on) {
   for (const i of $(containerId).querySelectorAll('input')) { i.disabled = !on; i.parentElement.classList.toggle('off', !on); }
 }
@@ -2483,6 +2816,8 @@ function selectGame(id) {
   $('level-wrap').style.visibility = o.difficulty ? 'visible' : 'hidden';
   $('difflabel').textContent = (o.difficultyLabel || 'Level') + ':';
   $('btn-reset').textContent = o.reset || 'New Game';
+  if (id !== 'glue' && App.custom) { App.topology = App.custom.fallback || 'square'; App.custom = null; syncSurfaceRadios(); }
+  if (CANON[App.topology] && id !== 'glue') { App.topology = CANON[App.topology]; syncSurfaceRadios(); }    // only the gluing game uses the tipped-over surfaces
   UI.banner(''); UI.panel('');
   Engine.setGame(g);
   layout();
@@ -2492,7 +2827,7 @@ function selectGame(id) {
 
 function bindControls() {
   $('seg-topo').addEventListener('change', e => {
-    App.topology = e.target.value; UI.banner(''); Engine.game.reset(); Engine.goHome(true); focusBoard();
+    App.custom = null; App.topology = e.target.value; UI.banner(''); Engine.game.reset(); Engine.goHome(true); focusBoard();
   });
   $('seg-view').addEventListener('change', e => { Engine.setViewMode(e.target.value); focusBoard(); });
   $('seg-players').addEventListener('change', e => {
@@ -2535,6 +2870,7 @@ function layout() {
   // wide windows: the game box fills the rest of the window; narrow ones (stacked layout): a roughly square box
   const g = Engine.game, room = narrow && g && g.roomBelow;           // some games keep a small panel below the board on a narrow screen
   a.style.height = (narrow ? (room ? clamp(window.innerHeight - top - room, 250, window.innerWidth - 24) : Math.max(300, Math.min(window.innerWidth - 24, window.innerHeight * 0.78))) : Math.max(380, window.innerHeight - top - 78)) + 'px';
+  $('panel').style.maxHeight = narrow ? '' : a.style.height;                   // beside the board, a long panel scrolls instead of making the page taller
   Engine.resize();
 }
 
